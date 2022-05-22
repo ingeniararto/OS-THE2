@@ -135,7 +135,7 @@ int commandwait(long ms)
     pthread_mutex_unlock(&condition_lock);
     if (status = ETIMEDOUT && !flag)
     {
-        printf("Done\n");
+        //printf("Done\n");
         return 0;
     }
     else if (flag == BREAK)
@@ -148,35 +148,6 @@ int commandwait(long ms)
     }
 }
 
-int us_commandwait(long us)
-{
-    struct timespec wait;
-    struct timespec curr_time;
-    int status;
-    timespec_get(&curr_time, TIME_UTC);
-    wait.tv_sec = curr_time.tv_sec + us / 1000;
-    wait.tv_nsec = curr_time.tv_nsec + us;
-    if (wait.tv_nsec >= 1000000000)
-    {
-        wait.tv_nsec -= 1000000000;
-        wait.tv_sec++;
-    }
-    pthread_mutex_lock(&condition_lock);
-    status = pthread_cond_timedwait(&command_condition, &condition_lock, &wait);
-    pthread_mutex_unlock(&condition_lock);
-    if (status = ETIMEDOUT && !flag)
-    {
-        return 0;
-    }
-    else if (flag == BREAK)
-    {
-        return BREAK;
-    }
-    else if (flag == STOP)
-    {
-        return STOP;
-    }
-}
 
 void break_handler(bool did_locked, int p_row, int p_col, int a, int b, int gid)
 {
@@ -209,13 +180,13 @@ int gather(int i, int j, int a, int b, long time, int gid)
         {
             while (grid[row][col])
             {
-                if (command = commandwait(time) == BREAK)
+                if (command = commandwait(time) == BREAK || flag ==BREAK)
                 {
                     // cerr << "go to handler" << endl;
                     break_handler(true, i, j, a, b, gid);
                     return 1;
                 }
-                else if (command == STOP)
+                else if (command == STOP || flag == STOP)
                 {
                     // stop
                     return 2;
@@ -248,7 +219,7 @@ int smoke(int i, int j, long time, int sid, int cignum)
             {
                 continue;
             }
-            if (command = commandwait(time) == STOP)
+            if (command = commandwait(time) == STOP || flag == STOP)
             {
                 // cerr << "stop" << endl;
                 return 2;
@@ -301,7 +272,7 @@ void *proper_private_thread(void *pprivate)
                     break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
                     goto go_back_and_check;
                 }
-                else if (flag == STOP)
+                else if (flag == STOP) //stop
                 {
                     can_go_in = false;
                     status = 2;
@@ -328,7 +299,7 @@ void *proper_private_thread(void *pprivate)
                         break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
                         goto go_back_and_check;
                     }
-                    else if (flag == STOP)
+                    else if (flag == STOP) //stop
                     {
                         pthread_mutex_unlock(&lockers_queue);
                         can_go_in = false;
@@ -358,7 +329,7 @@ void *proper_private_thread(void *pprivate)
                         break_handler(true, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
                         goto go_back_and_check;
                     }
-                    else if (flag == STOP)
+                    else if (flag == STOP) // stop
                     {
                         pthread_mutex_unlock(&lockers_queue);
                         can_go_in = false;
@@ -372,10 +343,11 @@ void *proper_private_thread(void *pprivate)
             status = gather(p_row, p_col, p_row + a, p_col + b, time, gid);
             if (status == 1)
             { // break and continue
+                status = 0;
                 goto go_back_and_check;
             }
-            else if (status == 2)
-            { // stop
+            else if (status == 2) // stop
+            { 
                 goto end;
             }
         }
@@ -515,26 +487,29 @@ void *command_thread(void *commands_vector)
 
             hw2_notify(ORDER_BREAK, 0, 0, 0);
             pthread_mutex_lock(&condition_lock);
+            flag = BREAK;
             pthread_cond_broadcast(&command_condition);
             pthread_mutex_unlock(&condition_lock);
-            flag = BREAK;
+            
 
             break;
         case CONTINUE:
 
             hw2_notify(ORDER_CONTINUE, 0, 0, 0);
             pthread_mutex_lock(&continue_condition_lock);
+            flag = CONTINUE;
             pthread_cond_broadcast(&continue_command_condition);
             pthread_mutex_unlock(&continue_condition_lock);
-            flag = CONTINUE;
+            
 
             break;
         case STOP:
             hw2_notify(ORDER_STOP, 0, 0, 0);
             pthread_mutex_lock(&condition_lock);
+            flag = STOP;
             pthread_cond_broadcast(&command_condition);
             pthread_mutex_unlock(&condition_lock);
-            flag = STOP;
+            
 
             break;
         default:
