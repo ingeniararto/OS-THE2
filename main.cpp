@@ -9,6 +9,7 @@
 using namespace std;
 
 unsigned long row, col;
+long pp_num;
 struct timeval start_time;
 
 template <typename T>
@@ -47,9 +48,14 @@ pthread_mutex_t lockers_queue = PTHREAD_MUTEX_INITIALIZER;           // lock for
 pthread_mutex_t smoking = PTHREAD_MUTEX_INITIALIZER;                 // lock for increasing cigbutts
 pthread_mutex_t condition_lock = PTHREAD_MUTEX_INITIALIZER;          // lock for cond timedwait
 pthread_mutex_t continue_condition_lock = PTHREAD_MUTEX_INITIALIZER; // lock for cond timedwait
+pthread_mutex_t pp_thread_num_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 pthread_cond_t command_condition = PTHREAD_COND_INITIALIZER;
 pthread_cond_t continue_command_condition = PTHREAD_COND_INITIALIZER;
+
+pthread_barrier_t barrier;
+
+int pp_thread_num;
 
 enum command_type
 {
@@ -135,7 +141,7 @@ int commandwait(long ms)
     pthread_mutex_unlock(&condition_lock);
     if (status = ETIMEDOUT && !flag)
     {
-        //printf("Done\n");
+        // printf("Done\n");
         return 0;
     }
     else if (flag == BREAK)
@@ -146,12 +152,15 @@ int commandwait(long ms)
     {
         return STOP;
     }
+    return 0;
 }
 
-
-void break_handler(bool did_locked, int p_row, int p_col, int a, int b, int gid)
+int break_handler(bool did_locked, int p_row, int p_col, int a, int b, int gid)
 {
+    int cont = 0;
+    int stop = 0;
     hw2_notify(PROPER_PRIVATE_TOOK_BREAK, gid, 0, 0);
+    pthread_barrier_wait(&barrier);
     if (did_locked)
     {
         pthread_mutex_lock(&lockers_queue);
@@ -159,15 +168,43 @@ void break_handler(bool did_locked, int p_row, int p_col, int a, int b, int gid)
         {
             for (int k = p_col; k < b; k++)
             {
+                if (flag == CONTINUE)
+                {
+                    cont = 1;
+                }
+                if (flag == STOP)
+                {
+                    if (cont == 1)
+                    {
+                        stop = 2;
+                    }
+                    else
+                    {
+                        stop = 1;
+                        goto out;
+                    }
+                }
                 cell_occupied[j][k].first = false;
             }
         }
         pthread_mutex_unlock(&lockers_queue);
     }
-    pthread_mutex_lock(&continue_condition_lock);
-    pthread_cond_wait(&continue_command_condition, &continue_condition_lock);
-    pthread_mutex_unlock(&continue_condition_lock);
+    if (!cont)
+    {
+        pthread_mutex_lock(&continue_condition_lock);
+        pthread_cond_wait(&continue_command_condition, &continue_condition_lock);
+        pthread_mutex_unlock(&continue_condition_lock);
+        if (flag == STOP)
+        {
+            stop = 1;
+            goto out;
+        }
+    }
     hw2_notify(PROPER_PRIVATE_CONTINUED, gid, 0, 0);
+    pthread_barrier_wait(&barrier);
+    return stop;
+out:
+    return stop;
 }
 
 int gather(int i, int j, int a, int b, long time, int gid)
@@ -180,7 +217,7 @@ int gather(int i, int j, int a, int b, long time, int gid)
         {
             while (grid[row][col])
             {
-                if (command = commandwait(time) == BREAK || flag ==BREAK)
+                if (command = commandwait(time) == BREAK || flag == BREAK)
                 {
                     // cerr << "go to handler" << endl;
                     break_handler(true, i, j, a, b, gid);
@@ -251,9 +288,13 @@ void *proper_private_thread(void *pprivate)
 {
     p_private *proper_private = (struct p_private *)(pprivate);
     hw2_notify(PROPER_PRIVATE_CREATED, proper_private->gid, 0, 0);
+    pthread_mutex_lock(&pp_thread_num_mutex);
+    pp_thread_num++;
+    pthread_mutex_unlock(&pp_thread_num_mutex);
     int a = proper_private->s_i;
     int b = proper_private->s_j;
     int status = 0;
+    int did_stop_come = 0;
     long time = proper_private->t_g;
     int gid = proper_private->gid;
     for (int i = 0; i < proper_private->n_g; i++)
@@ -269,10 +310,16 @@ void *proper_private_thread(void *pprivate)
             {
                 if (flag == BREAK)
                 {
-                    break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                    did_stop_come = break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                    if (did_stop_come)
+                    {
+                        can_go_in = false;
+                        status = 2;
+                        goto end;
+                    }
                     goto go_back_and_check;
                 }
-                else if (flag == STOP) //stop
+                else if (flag == STOP) // stop
                 {
                     can_go_in = false;
                     status = 2;
@@ -296,10 +343,16 @@ void *proper_private_thread(void *pprivate)
                     if (flag == BREAK)
                     {
                         pthread_mutex_unlock(&lockers_queue);
-                        break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                        did_stop_come = break_handler(false, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                        if (did_stop_come)
+                        {
+                            can_go_in = false;
+                            status = 2;
+                            goto end;
+                        }
                         goto go_back_and_check;
                     }
-                    else if (flag == STOP) //stop
+                    else if (flag == STOP) // stop
                     {
                         pthread_mutex_unlock(&lockers_queue);
                         can_go_in = false;
@@ -326,7 +379,13 @@ void *proper_private_thread(void *pprivate)
                     if (flag == BREAK)
                     {
                         pthread_mutex_unlock(&lockers_queue);
-                        break_handler(true, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                        did_stop_come = break_handler(true, p_row, p_col, p_row + a, p_col + b, proper_private->gid);
+                        if (did_stop_come)
+                        {
+                            can_go_in = false;
+                            status = 2;
+                            goto end;
+                        }
                         goto go_back_and_check;
                     }
                     else if (flag == STOP) // stop
@@ -347,7 +406,7 @@ void *proper_private_thread(void *pprivate)
                 goto go_back_and_check;
             }
             else if (status == 2) // stop
-            { 
+            {
                 goto end;
             }
         }
@@ -357,12 +416,19 @@ void *proper_private_thread(void *pprivate)
         }
     }
 end:
+
     if (status == 2)
     {
         hw2_notify(PROPER_PRIVATE_STOPPED, proper_private->gid, 0, 0);
+        pthread_mutex_lock(&pp_thread_num_mutex);
+        pp_thread_num--;
+        pthread_mutex_unlock(&pp_thread_num_mutex);
         pthread_exit(NULL);
     }
     hw2_notify(PROPER_PRIVATE_EXITED, proper_private->gid, 0, 0);
+    pthread_mutex_lock(&pp_thread_num_mutex);
+    pp_thread_num--;
+    pthread_mutex_unlock(&pp_thread_num_mutex);
     pthread_exit(NULL);
 }
 
@@ -476,41 +542,73 @@ void *command_thread(void *commands_vector)
     vector<command *> *commands = (vector<command *> *)commands_vector;
     long time;
     command *command;
+    int thread_num;
     for (int i = 0; i < commands->size(); i++)
     {
         command = (*commands)[i];
-        while ((time = get_timestamp(start_time)) < (command->time) * 1000)
-            ;
+        // while ((time = get_timestamp(start_time)) < (command->time) * 1000);
+        time = (command->time) * 1000 - get_timestamp(start_time);
+        if (time > 0)
+        {
+            usleep(time);
+        }
         switch (command->type)
         {
         case BREAK:
-
-            hw2_notify(ORDER_BREAK, 0, 0, 0);
-            pthread_mutex_lock(&condition_lock);
-            flag = BREAK;
-            pthread_cond_broadcast(&command_condition);
-            pthread_mutex_unlock(&condition_lock);
-            
+            if (flag == STOP)
+            {
+                hw2_notify(ORDER_BREAK, 0, 0, 0);
+            }
+            else if (flag != BREAK)
+            {
+                pthread_mutex_lock(&pp_thread_num_mutex);
+                thread_num = pp_thread_num + 1;
+                pthread_mutex_unlock(&pp_thread_num_mutex);
+                pthread_barrier_init(&barrier, NULL, thread_num);
+                hw2_notify(ORDER_BREAK, 0, 0, 0);
+                pthread_mutex_lock(&condition_lock);
+                flag = BREAK;
+                pthread_cond_broadcast(&command_condition);
+                pthread_mutex_unlock(&condition_lock);
+                pthread_barrier_wait(&barrier);
+                pthread_barrier_destroy(&barrier);
+            }
+            else
+            {
+                hw2_notify(ORDER_BREAK, 0, 0, 0);
+            }
 
             break;
         case CONTINUE:
-
-            hw2_notify(ORDER_CONTINUE, 0, 0, 0);
-            pthread_mutex_lock(&continue_condition_lock);
-            flag = CONTINUE;
-            pthread_cond_broadcast(&continue_command_condition);
-            pthread_mutex_unlock(&continue_condition_lock);
-            
+            if (flag == BREAK)
+            {
+                pthread_mutex_lock(&pp_thread_num_mutex);
+                thread_num = pp_thread_num + 1;
+                pthread_mutex_unlock(&pp_thread_num_mutex);
+                pthread_barrier_init(&barrier, NULL, pp_num + 1);
+                hw2_notify(ORDER_CONTINUE, 0, 0, 0);
+                pthread_mutex_lock(&continue_condition_lock);
+                flag = CONTINUE;
+                pthread_cond_broadcast(&continue_command_condition);
+                pthread_mutex_unlock(&continue_condition_lock);
+                pthread_barrier_wait(&barrier);
+                pthread_barrier_destroy(&barrier);
+            }
+            else
+            {
+                hw2_notify(ORDER_CONTINUE, 0, 0, 0);
+            }
 
             break;
         case STOP:
             hw2_notify(ORDER_STOP, 0, 0, 0);
-            pthread_mutex_lock(&condition_lock);
             flag = STOP;
+            pthread_mutex_lock(&condition_lock);
             pthread_cond_broadcast(&command_condition);
             pthread_mutex_unlock(&condition_lock);
-            
-
+            pthread_mutex_lock(&continue_condition_lock);
+            pthread_cond_broadcast(&continue_command_condition);
+            pthread_mutex_unlock(&continue_condition_lock);
             break;
         default:
             break;
@@ -524,9 +622,10 @@ int main()
 
     string get_line;
     char *line;
-    int pp_num = 0;
+    pp_num = 0;
     int order_num = 0;
     int ss_num = 0;
+    int order_t_num = 0;
 
     vector<p_private *> p_privates;
     p_private *new_private;
@@ -592,66 +691,77 @@ int main()
     }
 
     getline(cin, get_line); // starting parsing commands
-    order_num = stoi(get_line);
-
-    for (int i = 0; i < order_num; i++)
+    if (!cin.eof())
     {
-        getline(cin, get_line);
-        free(line);
-        line = new char[get_line.length() + 1];
-        copy(get_line.begin(), get_line.end(), line);
-        line[get_line.length()] = '\n';
-        new_command = new command();
-        new_command->time = stoi(strtok(line, " "));
-        char *type = strtok(NULL, " ");
-        if (type[0] == 'c')
+        order_num = stoi(get_line);
+        if (order_num != 0)
         {
-            new_command->type = CONTINUE;
+            order_t_num = 1;
         }
-        else if (type[0] == 'b')
-        {
-            new_command->type = BREAK;
-        }
-        else
-        {
-            new_command->type = STOP;
-        }
-        commands.push_back(new_command);
-    }
 
-    getline(cin, get_line); // starting parsing sneaky smokers
-    ss_num = stoi(get_line);
-
-    for (int i = 0; i < ss_num; i++)
-    {
-        getline(cin, get_line);
-        free(line);
-        line = new char[get_line.length() + 1];
-        copy(get_line.begin(), get_line.end(), line);
-        line[get_line.length()] = '\n';
-        new_ssmoker = create_s_smoker(line);
-        for (int i = 0; i < new_ssmoker->n_s; i++)
+        for (int i = 0; i < order_num; i++)
         {
             getline(cin, get_line);
             free(line);
             line = new char[get_line.length() + 1];
             copy(get_line.begin(), get_line.end(), line);
             line[get_line.length()] = '\n';
-            int p_row = stoi(strtok(line, " "));
-            int p_col = stoi(strtok(NULL, " "));
-            new_ssmoker->position.push_back(make_pair(p_row, p_col));
-            new_ssmoker->cignum.push_back(stoi(strtok(NULL, " ")));
+            new_command = new command();
+            new_command->time = stoi(strtok(line, " "));
+            char *type = strtok(NULL, " ");
+            if (type[0] == 'c')
+            {
+                new_command->type = CONTINUE;
+            }
+            else if (type[0] == 'b')
+            {
+                new_command->type = BREAK;
+            }
+            else
+            {
+                new_command->type = STOP;
+            }
+            commands.push_back(new_command);
         }
-        s_smokers.push_back(new_ssmoker);
+
+        getline(cin, get_line); // starting parsing sneaky smokers
+        if (!cin.eof())
+        {
+            ss_num = stoi(get_line);
+
+            for (int i = 0; i < ss_num; i++)
+            {
+                getline(cin, get_line);
+                free(line);
+                line = new char[get_line.length() + 1];
+                copy(get_line.begin(), get_line.end(), line);
+                line[get_line.length()] = '\n';
+                new_ssmoker = create_s_smoker(line);
+                for (int i = 0; i < new_ssmoker->n_s; i++)
+                {
+                    getline(cin, get_line);
+                    free(line);
+                    line = new char[get_line.length() + 1];
+                    copy(get_line.begin(), get_line.end(), line);
+                    line[get_line.length()] = '\n';
+                    int p_row = stoi(strtok(line, " "));
+                    int p_col = stoi(strtok(NULL, " "));
+                    new_ssmoker->position.push_back(make_pair(p_row, p_col));
+                    new_ssmoker->cignum.push_back(stoi(strtok(NULL, " ")));
+                }
+                s_smokers.push_back(new_ssmoker);
+            }
+        }
     }
 
     // start processes
-    hw2_init_notifier();
-    gettimeofday(&start_time, NULL);
     int j = 0;
     int k = 0;
     int l = 0;
     int a = 0;
+    hw2_init_notifier();
+    gettimeofday(&start_time, NULL);
+
     pthread_t *threads = new pthread_t[pp_num + ss_num + order_num];
     while (j < pp_num)
     {
@@ -665,9 +775,13 @@ int main()
         k++;
         a++;
     }
-    pthread_create(&threads[a], NULL, command_thread, (void *)&commands);
-    a++;
-    for (int a = 0; a < pp_num + ss_num + 1; a++)
+    if (order_t_num)
+    {
+        pthread_create(&threads[a], NULL, command_thread, (void *)&commands);
+        a++;
+    }
+
+    for (int a = 0; a < pp_num + ss_num + order_t_num; a++)
     {
         int e = pthread_join(threads[a], NULL);
         if (e)
